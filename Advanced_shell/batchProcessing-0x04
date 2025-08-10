@@ -2,7 +2,7 @@
 
 # Parallel Pokémon data retrieval script
 # Fetches data for multiple Pokémon simultaneously using background processes
-# Implements proper process management and synchronization
+# Implements proper process management and synchronization with kill commands
 
 # List of Pokémon to fetch
 POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
@@ -17,13 +17,15 @@ API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
 # Configuration
 MAX_PARALLEL_JOBS=3  # Limit concurrent processes to avoid overwhelming the API
 REQUEST_DELAY=0.5    # Small delay between starting processes
+TIMEOUT_SECONDS=30   # Maximum time to wait for any single job
 
 echo "Starting parallel Pokémon data retrieval..."
 echo "=========================================="
 echo "Configuration:"
 echo "  - Pokémon to fetch: ${#POKEMON_LIST[@]}"
-echo "  - Max parallel jobs: $MAX_PARLEL_JOBS"
+echo "  - Max parallel jobs: $MAX_PARALLEL_JOBS"
 echo "  - Process start delay: ${REQUEST_DELAY}s"
+echo "  - Job timeout: ${TIMEOUT_SECONDS}s"
 echo "=========================================="
 
 # Initialize tracking variables
@@ -32,6 +34,29 @@ completed_jobs=0
 failed_jobs=0
 job_pids=()
 job_names=()
+
+# Signal handling for graceful shutdown
+cleanup() {
+    echo ""
+    echo "🛑 Received interrupt signal. Cleaning up background processes..."
+    
+    # Kill all background processes
+    for pid in "${job_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "  🗑️  Terminating process $pid"
+            kill "$pid" 2>/dev/null
+        fi
+    done
+    
+    # Clean up temporary files
+    rm -f /tmp/pokemon_job_*
+    
+    echo "✅ Cleanup completed. Exiting."
+    exit 1
+}
+
+# Set up signal handlers
+trap cleanup INT TERM
 
 # Function to fetch a single Pokémon
 fetch_pokemon() {
@@ -43,9 +68,9 @@ fetch_pokemon() {
     # Construct the API URL
     local api_url="$API_BASE_URL/$pokemon"
     
-    # Make the API request
+    # Make the API request with timeout
     local response
-    if response=$(curl -s -w "%{http_code}" "$api_url" 2>/dev/null); then
+    if response=$(timeout $TIMEOUT_SECONDS curl -s -w "%{http_code}" "$api_url" 2>/dev/null); then
         # Extract HTTP status code and response body
         local http_code="${response: -3}"
         local response_body="${response%???}"
@@ -67,8 +92,14 @@ fetch_pokemon() {
             echo "FAILED:$pokemon:$http_code" > "/tmp/pokemon_job_$job_id"
         fi
     else
-        echo "[$job_id] ❌ $pokemon: Network error"
-        echo "FAILED:$pokemon:NETWORK" > "/tmp/pokemon_job_$job_id"
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "[$job_id] ⏰ $pokemon: Request timed out after ${TIMEOUT_SECONDS}s"
+            echo "FAILED:$pokemon:TIMEOUT" > "/tmp/pokemon_job_$job_id"
+        else
+            echo "[$job_id] ❌ $pokemon: Network error (exit code: $exit_code)"
+            echo "FAILED:$pokemon:NETWORK" > "/tmp/pokemon_job_$job_id"
+        fi
     fi
 }
 
@@ -114,6 +145,16 @@ check_job_status() {
     return 1
 }
 
+# Function to check if a process is still running
+is_process_running() {
+    local pid="$1"
+    if kill -0 "$pid" 2>/dev/null; then
+        return 0  # Process is running
+    else
+        return 1  # Process has finished
+    fi
+}
+
 # Function to wait for available job slot
 wait_for_job_slot() {
     while [ $active_jobs -ge $MAX_PARALLEL_JOBS ]; do
@@ -138,8 +179,8 @@ echo ""
 
 # Start initial batch of jobs
 for i in "${!POKEMON_LIST[@]}"; do
-    local pokemon="${POKEMON_LIST[$i]}"
-    local job_id="$i"
+    pokemon="${POKEMON_LIST[$i]}"
+    job_id="$i"
     
     # Wait for available job slot if needed
     wait_for_job_slot
@@ -155,6 +196,7 @@ echo ""
 echo "All initial jobs started. Waiting for completion..."
 
 # Wait for all remaining jobs to complete
+echo "  🔄 Monitoring $active_jobs background processes..."
 while [ $active_jobs -gt 0 ]; do
     for job_id in "${!job_pids[@]}"; do
         if check_job_status "$job_id"; then
@@ -169,6 +211,15 @@ while [ $active_jobs -gt 0 ]; do
     if [ $active_jobs -gt 0 ]; then
         echo "  🔄 Waiting for $active_jobs jobs to complete..."
         sleep 0.5
+    fi
+done
+
+# Final cleanup - ensure all processes are terminated
+echo "  🧹 Final cleanup of background processes..."
+for pid in "${job_pids[@]}"; do
+    if is_process_running "$pid"; then
+        echo "  🗑️  Terminating remaining process $pid"
+        kill "$pid" 2>/dev/null
     fi
 done
 
@@ -193,7 +244,7 @@ if [ $completed_jobs -gt 0 ]; then
     echo "📋 Generated files:"
     for pokemon in "${POKEMON_LIST[@]}"; do
         if [ -f "$POKEMON_DATA_DIR/${pokemon}.json" ]; then
-            local file_size=$(wc -c < "$POKEMON_DATA_DIR/${pokemon}.json")
+            file_size=$(wc -c < "$POKEMON_DATA_DIR/${pokemon}.json")
             echo "  - ${pokemon}.json ($file_size bytes)"
         fi
     done
