@@ -35,6 +35,10 @@ BEGIN {
     # Capitalize first letter of name
     name = toupper(substr(name, 1, 1)) substr(name, 2)
     
-    # Format the output
-    printf "%s is of type %s, weighs %.0fkg, and is %.1fm tall.\n", name, type, weight_kg, height_m
+    # Format the output using the exact required format
+    formatted_height = sprintf("%.1f", height_m)
+    formatted_weight = sprintf("%.0f", weight_kg)
+    
+    # Output the exact required format
+    print name " is of type " type ", weighs " formatted_weight "kg, and is " formatted_height "m tall."
 }'
