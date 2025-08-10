@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Batch Pokémon data retrieval script with enhanced error handling and retry logic
+# Fetches data for multiple Pokémon and saves to separate files
+# Handles rate limiting with delays between requests
+# Implements retry mechanism for failed requests
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Create pokemon_data directory if it doesn't exist
+POKEMON_DATA_DIR="pokemon_data"
+mkdir -p "$POKEMON_DATA_DIR"
+
+# Base API URL
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+
+# Delay between requests (in seconds) to avoid rate limiting
+REQUEST_DELAY=1
+
+# Retry configuration
+MAX_RETRIES=3
+RETRY_DELAY=2
+
+echo "Starting batch Pokémon data retrieval with enhanced error handling..."
+echo "===================================================================="
+echo "Configuration:"
+echo "  - Max retries per Pokémon: $MAX_RETRIES"
+echo "  - Retry delay: ${RETRY_DELAY}s"
+echo "  - Request delay: ${REQUEST_DELAY}s"
+echo "===================================================================="
+
+# Initialize statistics
+successful_fetches=0
+failed_fetches=0
+total_retries=0
+
+# Loop through each Pokémon
+for pokemon in "${POKEMON_LIST[@]}"; do
+    echo "Fetching data for $pokemon..."
+    
+    # Construct the API URL for this Pokémon
+    api_url="$API_BASE_URL/$pokemon"
+    
+    # Initialize retry counter
+    retry_count=0
+    success=false
+    
+    # Retry loop for API requests
+    while [ $retry_count -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+        if [ $retry_count -gt 0 ]; then
+            echo "  🔄 Retry attempt $retry_count/$MAX_RETRIES for $pokemon..."
+            total_retries=$((total_retries + 1))
+            sleep $RETRY_DELAY
+        fi
+        
+        # Make the API request
+        if response=$(curl -s -w "%{http_code}" "$api_url" 2>/dev/null); then
+            # Extract HTTP status code (last 3 characters)
+            http_code="${response: -3}"
+            
+            # Extract response body (everything except last 3 characters)
+            response_body="${response%???}"
+            
+            # Check if the request was successful (HTTP 200)
+            if [ "$http_code" -eq 200 ]; then
+                # Save successful response to pokemon-specific file
+                output_file="$POKEMON_DATA_DIR/${pokemon}.json"
+                echo "$response_body" > "$output_file"
+                
+                # Get file size for confirmation
+                file_size=$(wc -c < "$output_file")
+                echo "  ✅ Saved data to $output_file ($file_size bytes)"
+                success=true
+                successful_fetches=$((successful_fetches + 1))
+            else
+                # Handle different HTTP error codes
+                case $http_code in
+                    404)
+                        echo "  ❌ HTTP 404: Pokémon '$pokemon' not found"
+                        break  # Don't retry for 404 errors
+                        ;;
+                    429)
+                        echo "  ⚠️  HTTP 429: Rate limited, waiting longer before retry..."
+                        sleep $((RETRY_DELAY * 2))
+                        ;;
+                    5*)
+                        echo "  ❌ HTTP $http_code: Server error, retrying..."
+                        ;;
+                    *)
+                        echo "  ❌ HTTP $http_code: Unexpected error, retrying..."
+                        ;;
+                esac
+                
+                retry_count=$((retry_count + 1))
+            fi
+        else
+            # Handle curl command failures (network issues)
+            echo "  ❌ Network error for $pokemon, retrying..."
+            retry_count=$((retry_count + 1))
+        fi
+    done
+    
+    # Check if we failed after all retries
+    if [ "$success" = false ]; then
+        echo "  💥 Failed to retrieve $pokemon after $MAX_RETRIES attempts - skipping to next Pokémon"
+        failed_fetches=$((failed_fetches + 1))
+        # Log error to error file
+        error_msg="$(date '+%Y-%m-%d %H:%M:%S') - Failed to retrieve $pokemon after $MAX_RETRIES attempts"
+        echo "$error_msg" >> "$POKEMON_DATA_DIR/errors.log"
+    fi
+    
+    # Add delay between requests to avoid rate limiting
+    if [ "$pokemon" != "${POKEMON_LIST[4]}" ]; then
+        echo "Waiting ${REQUEST_DELAY}s before next request..."
+        sleep "$REQUEST_DELAY"
+    fi
+done
+
+echo "===================================================================="
+echo "🎉 Batch Pokémon data retrieval completed!"
+echo "===================================================================="
+echo "📊 Final Statistics:"
+echo "  - Total Pokémon requested: ${#POKEMON_LIST[@]}"
+echo "  - Successful fetches: $successful_fetches"
+echo "  - Failed fetches: $failed_fetches"
+echo "  - Total retry attempts: $total_retries"
+echo "  - Success rate: $(( (successful_fetches * 100) / ${#POKEMON_LIST[@]} ))%"
+echo ""
+echo "📁 Data saved in: $POKEMON_DATA_DIR/"
+if [ -f "$POKEMON_DATA_DIR/errors.log" ]; then
+    echo "⚠️  Errors logged to: $POKEMON_DATA_DIR/errors.log"
+fi

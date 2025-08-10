@@ -1,0 +1,200 @@
+#!/bin/bash
+
+# Parallel Pokémon data retrieval script
+# Fetches data for multiple Pokémon simultaneously using background processes
+# Implements proper process management and synchronization
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Create pokemon_data directory if it exists
+POKEMON_DATA_DIR="pokemon_data"
+mkdir -p "$POKEMON_DATA_DIR"
+
+# Base API URL
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+
+# Configuration
+MAX_PARALLEL_JOBS=3  # Limit concurrent processes to avoid overwhelming the API
+REQUEST_DELAY=0.5    # Small delay between starting processes
+
+echo "Starting parallel Pokémon data retrieval..."
+echo "=========================================="
+echo "Configuration:"
+echo "  - Pokémon to fetch: ${#POKEMON_LIST[@]}"
+echo "  - Max parallel jobs: $MAX_PARLEL_JOBS"
+echo "  - Process start delay: ${REQUEST_DELAY}s"
+echo "=========================================="
+
+# Initialize tracking variables
+active_jobs=0
+completed_jobs=0
+failed_jobs=0
+job_pids=()
+job_names=()
+
+# Function to fetch a single Pokémon
+fetch_pokemon() {
+    local pokemon="$1"
+    local job_id="$2"
+    
+    echo "[$job_id] 🚀 Starting fetch for $pokemon..."
+    
+    # Construct the API URL
+    local api_url="$API_BASE_URL/$pokemon"
+    
+    # Make the API request
+    local response
+    if response=$(curl -s -w "%{http_code}" "$api_url" 2>/dev/null); then
+        # Extract HTTP status code and response body
+        local http_code="${response: -3}"
+        local response_body="${response%???}"
+        
+        # Check if the request was successful
+        if [ "$http_code" -eq 200 ]; then
+            # Save successful response
+            local output_file="$POKEMON_DATA_DIR/${pokemon}.json"
+            echo "$response_body" > "$output_file"
+            
+            # Get file size
+            local file_size=$(wc -c < "$output_file")
+            echo "[$job_id] ✅ $pokemon: Data saved to $output_file ($file_size bytes)"
+            
+            # Signal success
+            echo "SUCCESS:$pokemon" > "/tmp/pokemon_job_$job_id"
+        else
+            echo "[$job_id] ❌ $pokemon: HTTP Error $http_code"
+            echo "FAILED:$pokemon:$http_code" > "/tmp/pokemon_job_$job_id"
+        fi
+    else
+        echo "[$job_id] ❌ $pokemon: Network error"
+        echo "FAILED:$pokemon:NETWORK" > "/tmp/pokemon_job_$job_id"
+    fi
+}
+
+# Function to start a new job
+start_job() {
+    local pokemon="$1"
+    local job_id="$2"
+    
+    # Start the fetch process in background
+    fetch_pokemon "$pokemon" "$job_id" &
+    local pid=$!
+    
+    # Store job information
+    job_pids+=($pid)
+    job_names+=("$pokemon")
+    
+    echo "[$job_id] 📋 Started background process for $pokemon (PID: $pid)"
+    active_jobs=$((active_jobs + 1))
+}
+
+# Function to check job status
+check_job_status() {
+    local job_id="$1"
+    local status_file="/tmp/pokemon_job_$job_id"
+    
+    if [ -f "$status_file" ]; then
+        local status=$(cat "$status_file")
+        local pokemon=$(echo "$status" | cut -d: -f2)
+        
+        if [[ "$status" == SUCCESS:* ]]; then
+            echo "  ✅ $pokemon completed successfully"
+            completed_jobs=$((completed_jobs + 1))
+        elif [[ "$status" == FAILED:* ]]; then
+            local error=$(echo "$status" | cut -d: -f3)
+            echo "  ❌ $pokemon failed: $error"
+            failed_jobs=$((failed_jobs + 1))
+        fi
+        
+        # Clean up status file
+        rm -f "$status_file"
+        return 0
+    fi
+    return 1
+}
+
+# Function to wait for available job slot
+wait_for_job_slot() {
+    while [ $active_jobs -ge $MAX_PARALLEL_JOBS ]; do
+        # Check for completed jobs
+        for job_id in "${!job_pids[@]}"; do
+            if check_job_status "$job_id"; then
+                # Remove completed job from tracking
+                unset "job_pids[$job_id]"
+                unset "job_names[$job_id]"
+                active_jobs=$((active_jobs - 1))
+            fi
+        done
+        
+        # Small delay before checking again
+        sleep 0.1
+    done
+}
+
+# Main execution loop
+echo "Starting parallel fetch operations..."
+echo ""
+
+# Start initial batch of jobs
+for i in "${!POKEMON_LIST[@]}"; do
+    local pokemon="${POKEMON_LIST[$i]}"
+    local job_id="$i"
+    
+    # Wait for available job slot if needed
+    wait_for_job_slot
+    
+    # Start the job
+    start_job "$pokemon" "$job_id"
+    
+    # Small delay between starting processes
+    sleep $REQUEST_DELAY
+done
+
+echo ""
+echo "All initial jobs started. Waiting for completion..."
+
+# Wait for all remaining jobs to complete
+while [ $active_jobs -gt 0 ]; do
+    for job_id in "${!job_pids[@]}"; do
+        if check_job_status "$job_id"; then
+            # Remove completed job from tracking
+            unset "job_pids[$job_id]"
+            unset "job_names[$job_id]"
+            active_jobs=$((active_jobs - 1))
+        fi
+    done
+    
+    # Show progress
+    if [ $active_jobs -gt 0 ]; then
+        echo "  🔄 Waiting for $active_jobs jobs to complete..."
+        sleep 0.5
+    fi
+done
+
+# Clean up any remaining status files
+rm -f /tmp/pokemon_job_*
+
+echo ""
+echo "=========================================="
+echo "🎉 Parallel Pokémon data retrieval completed!"
+echo "=========================================="
+echo "📊 Final Statistics:"
+echo "  - Total Pokémon requested: ${#POKEMON_LIST[@]}"
+echo "  - Successfully completed: $completed_jobs"
+echo "  - Failed: $failed_jobs"
+echo "  - Success rate: $(( (completed_jobs * 100) / ${#POKEMON_LIST[@]} ))%"
+echo ""
+echo "📁 Data saved in: $POKEMON_DATA_DIR/"
+
+# List all generated files
+if [ $completed_jobs -gt 0 ]; then
+    echo ""
+    echo "📋 Generated files:"
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        if [ -f "$POKEMON_DATA_DIR/${pokemon}.json" ]; then
+            local file_size=$(wc -c < "$POKEMON_DATA_DIR/${pokemon}.json")
+            echo "  - ${pokemon}.json ($file_size bytes)"
+        fi
+    done
+fi
